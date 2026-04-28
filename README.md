@@ -204,6 +204,6 @@ Playwright 跑的是真浏览器，JS 自动执行，`flwq39` 自然就算好了
 - [x] Stage 1：httpbin 表单（stage1_httpbin_form.py）
 - [x] Stage 2：登录 + 等待（stage2_success_herokuapp.py / stage2_bad_username.py / stage2_bad_password.py）
 - [x] Stage 3：XHR 拦截（stage3_intercept.py / stage3_jsonp.py）
-- [ ] Stage 4：税务查验页（手动验证码）
+- [x] Stage 4：税务查验页（手动验证码）（stage4_inv_veri.py）
 - [ ] Stage 5：OCR + 重试
 - [ ] Stage 6：FastAPI + 部署

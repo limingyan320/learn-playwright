@@ -597,30 +597,267 @@ if match == None:    # ⚠️ 不推荐
 
 ---
 
-## 下一站：Stage 4 预习
+## Stage 4 新学的心智模型
 
-**目标**：把 Stage 0–3 所有技能合在一起，攻打真正的税务总局查验页。
-
-**新概念**（不多）：
+### 1. TLS 容忍是 context 级别
 
 ```python
-# 1. 容忍自家 CA 的 TLS（税务总局必备）
 context = browser.new_context(ignore_https_errors=True)
 page = context.new_page()
-
-# 2. 元素截图（可选，给 Stage 5 OCR 用）
-page.locator("img.captcha").screenshot(path="captcha.png")
-
-# 3. 长发票号拆分
-fphm_full = "25377000000496974821"   # 20 位
-fpdm = fphm_full[:12]                  # 253770000004
-fphm = fphm_full[12:]                  # 96974821
 ```
 
-**核心问题**（先想答案再写）：
+不是 `launch` 参数，不是 `new_page` 参数，**必须 context 级别**。语义对应 httpx 的 `verify=False`：会话作用域，不是请求作用域。
 
-1. 拦 vatQuery 响应时，predicate 应该匹配啥关键字最稳？想想**只有 vatQuery 才独有**的 URL 特征。
-2. 假设你点了"获取验证码"按钮后，要等到验证码图片**真的出现**再继续下一步。怎么写显式等待？回想 Stage 2 的 `wait_for` / `expect`。
-3. 验证码图片是 `<img src="data:image/png;base64,xxxxxxx">` —— 你想拿到那张图（图片字节、不是 src 整个字符串），有几条路？提示：DOM 提取 vs 拦 yzmQuery 响应。
+inv-veri 用税务自家 CA，公共信任库不认，这个开关必备。
 
-把 Stage 3 学到的东西原封不动用上去，加一点 UI 交互层的粘合，就是 Stage 4。
+### 2. flwq39 自动生成实证：Playwright 赌注落地
+
+填完三字段一秒钟，yzmQuery 飞出去的 URL 里：
+
+```
+?...
+&v=2.0.23_090                           ← JS 版本号，跟 README 第 38 行一字不差
+&flwq39=E1K%2BFCmkyFY...（236 字符）     ← 加密字段，自动算好
+```
+
+**整个项目转向 Playwright 的核心赌注**：上一轮 httpx 卡死的就是这个 flwq39，怎么逆都逆不出来。Playwright 让浏览器自己跑混淆 JS，flwq39 自然就在请求里。
+
+**没写一行加解密代码，赌注成立**。这是 Stage 4 出土的第一件文物。
+
+### 3. `.fill()` 不触发 blur 事件（Stage 4 真坑）
+
+亲身踩过。`page.locator("#yzm").fill("WFH")` 写进 input.value 了，但页面"查 验"按钮死活不变蓝。
+
+机制差异：
+
+| 你做 | 浏览器内部 |
+|---|---|
+| `.fill(value)` | 直接设 input.value + 派 `input` 事件 |
+| 真用户敲键 | keydown → input → keyup → 失焦时 `blur` |
+
+Playwright 为了快**跳过焦点模拟**。绑在 `onblur` 上的校验逻辑（老站典型）不跑。
+
+修法：
+
+```python
+page.locator("#yzm").fill(answer)
+page.locator("#yzm").press("Tab")    # 模拟 Tab，自然失焦
+```
+
+`.press("Tab")` 在已聚焦元素上发 Tab，浏览器走完整焦点切换流程，blur 正常触发。
+
+**记忆**：`.fill()` 只动值，不动焦点。绑 onblur 的校验、UI 状态切换全都需要手动 Tab。
+
+### 4. 老站语义降级：id 选择器是合理降级，不是偷懒
+
+inv-veri 几乎所有元素都长这样：
+
+```html
+<tr>
+  <td><span class="font_red">*</span>发票号码：</td>
+  <td><input id="fphm" maxlength="20"></td>
+</tr>
+```
+
+没 `<label for>`，没 `aria-label`，没 `aria-labelledby`。视觉上"发票号码"四个字摆在那儿，**accessible name 算法看不到任何关联**。
+
+| 想用什么 | 能不能命中 |
+|---|---|
+| `get_by_label("发票号码")` | ❌ 不是真 `<label>` 元素 |
+| `get_by_role("textbox", name="发票号码")` | ❌ 同样的 accessible name 算法 |
+| `page.locator("#fphm")` | ✅ 一发命中 |
+
+降级优先级：
+
+```
+get_by_role / get_by_label                    ← 首选
+   ↓ 页面没提供语义
+page.locator("#某 id")                         ← 老站合理降级
+   ↓ id 也没
+page.locator(".class") / xpath                ← 最后兜底
+```
+
+README "先别学 CSS selector" 的本意是"别用 CSS 偷懒绕过 label"，**不是"绝对不许用 id 选择器"**。判断标准：页面**有没有语义钩子**。有就用语义，没有就降级，不愧疚。
+
+### 5. 元素两棵树都在，失效的不是"找元素"
+
+容易误解："`get_by_label` 找不到 = 元素不在"。**错**。
+
+```
+DOM 树：                a11y 树：
+<input id="fphm">       {role: "textbox", name: ""}
+       ↑                              ↑
+       元素在            元素在，但 name 是空的
+```
+
+失效的是"**用名字锁定**"。a11y 树没名牌，按"叫'发票号码'的那个 textbox"找不到——但元素本身好好待在 DOM 里，`page.locator("#fphm")` 永远命中。
+
+**记忆**：DOM 是物理层（一定有），a11y 是语义层（页面作者愿不愿意给）。物理层永远找得到，语义层是有可能"页面作者没写"的。
+
+### 6. 业务字段反语义命名（反爬套路）
+
+vatQuery 实际请求 URL：
+
+```
+?key1=253770000004     ← fpdm
+&key2=96974821         ← fphm
+&key3=20251024         ← kprq
+&key4=24               ← je
+&yzm=WFH               ← 验证码答案（明文）
+&fplx=09               ← 发票类型
+```
+
+**前端故意把语义名换成 `key1/2/3/4`**——增加逆向阅读难度。看响应也是 `key1/key2/key3`，没人告诉你哪个是哪个。
+
+但 Playwright 让你**完全绕过这层**：你只要 `.fill` 到对应 id 的输入框，浏览器 JS 自己做"输入框值 → key1/2/3/4"的映射。**这是 Playwright 第二个赢点**（第一个是 flwq39）。
+
+### 7. token 链路：yzmQuery → vatQuery
+
+yzmQuery 响应里的"小密码"会被前端 JS 偷偷揉进 vatQuery 请求：
+
+```
+yzmQuery 响应:                              vatQuery 请求 URL:
+{                                           ?key1=...
+  "key1": "iVBOR...",  ← base64 PNG         &key2=...
+  "key3": "0dfbd63d...",  ← 32 hex          ...
+  "key6": "8ad8f85d...",  ← 32 hex      →  &index=7725c9ff...    ← 这俩 token
+}                                           &key6=8ad8f8609c...   ← 串过来
+                                            &flwq39=...
+```
+
+`key3` / `key6` 是 anti-replay 会话 token——**httpx 直连根本不知道要塞这两个**。Playwright 让前端 JS 自动处理，赢点 +1。
+
+### 8. 两个"查验"按钮 toggle
+
+老站经典：HTML 里**两个查验按钮**互相隐藏切换。
+
+```html
+<button id="uncheckfp" disabled>查 验</button>            ← 灰色，初始显示
+<button id="checkfp"   style="display: none;">查 验</button>  ← 蓝色，初始隐藏
+```
+
+JS 检测验证码填好 + 失焦 → 隐藏 uncheckfp，显示 checkfp。
+
+`get_by_role("button", name="查 验")` 在初始状态命中 uncheckfp（disabled），**点不动**；`#checkfp` 直接锁定可点的那个，配合自动等待 visible/enabled。**又一个 id 选择器降级胜出**。
+
+### 9. 验证码两条路：殊途同归
+
+| 路 | 怎么写 | 评价 |
+|---|---|---|
+| A. XHR 拦截 + base64 解码 | `expect_response(yzmQuery)` + 剥壳 + `b64decode(key1)` | 网络层原汁原味 |
+| B. 元素截图 | `page.locator("#yzm_img").screenshot(path=...)` | 一行搞定，让浏览器替你解码 |
+
+两条路本质同一份数据：服务器 → JSONP 响应 → key1 base64 → JS 解码塞 `<img src="data:...">` → 浏览器渲染。**A 从头拿，B 从尾拿**。
+
+Stage 4 用 B 简单。但 A 路实证了 yzmQuery 响应有 6 个字段（key1=图，key2=时间戳，key3/key6=token，key4=状态码"00"，key5=次数？）——这些不走 A 路看不到。
+
+### 10. `data:image/png;base64,...` 不是真网络请求
+
+DevTools Network 面板会列 data: URL，但**它不发 HTTP 请求**——base64 数据本来就在 JS 里，浏览器本地解码渲染。
+
+`expect_response(lambda r: "data:image" in r.url)` 会一直 timeout，因为根本没有这条响应到达网络层。**要拦验证码字节，拦的是上一步生产 base64 的真 XHR**（这站是 yzmQuery JSONP），不是 data: URL 本身。
+
+### 11. README 第 142 行的预测被现场打脸
+
+README 写：
+
+> 新版全电票发票号码是 20 位，查验页的表单字段通常**分成 `发票代码(12)` + `发票号码(8)`**，要自己拆
+
+实测：inv-veri 是**单字段** `<input id="fphm" maxlength="20">`。整串 20 位 fill 进去，URL 里自动出现 `fpdm=253770000004&fphm=96974821`——**页面 JS 内部拆**了。
+
+**教训**：预言归预言，现场归现场。Stage 6 写 FastAPI 时按"页面替我拆"的事实写。
+
+### 12. 购销方下标不稳定（Stage 6 要小心）
+
+同一张发票，两次成功响应里 key2 split 出来：
+
+| 下标 | 第 N 次 | 第 N+1 次 |
+|---|---|---|
+| [2] | 济南滴滴（销方） | 南京通达海（购方） |
+| [6] | 南京通达海 | 济南滴滴 |
+
+**[2]/[6] 互换，但 [3-5]/[7-8] 的税号/地址/银行不动**——出现"南京公司配济南税号"的诡异组合。
+
+可能是这张票同时有正向开票 + 红字冲减（key3 里两条明细，一条 +26.80 一条 -3.50），服务器返回时"哪个公司在 [2] 位置"取决于哪一笔被认为是主项。
+
+**Stage 6 业务封装不能简单用下标取购销方**——要按税号开头识别地区（91370100 = 山东，91320106 = 江苏）或按其他稳定特征判定。
+
+### 13. try/finally 必须嵌在 `with sync_playwright()` 内层
+
+```python
+# ❌ 错：浏览器先死，input 挂在黑屏前
+try:
+    with sync_playwright() as p:
+        ...业务...
+finally:
+    input("\n")
+
+# ✅ 对：浏览器命包业务命
+with sync_playwright() as p:
+    ...
+    try:
+        ...业务...
+    finally:
+        input("\n")
+```
+
+`with` 出块的 `__exit__` 拆 playwright（关浏览器）发生在外层 finally **之前**——所以"留现场"必须在 with 块内部 finally。
+
+**记忆**：with 是浏览器的命，try 是业务的命。**业务的命要嵌在浏览器命里**，反过来浏览器先死。
+
+---
+
+## Stage 4 完整成果（供回顾）
+
+脚本：`stage4_inv_veri.py` — 自动打开 inv-veri → 填三字段 → 拦 yzmQuery 解出验证码图 → 人输答案 → 填答案 + Tab 失焦 → 拦 vatQuery 打印查验结果。验证码识别外全自动。
+
+关键学到的：
+
+1. **Playwright 赌注落地**：flwq39 自动生成 + token 链路自动维护，httpx 卡死的两座大山一次性绕过
+2. **`.fill()` 不触发 blur**：老站绑 onblur 的校验必须 `.press("Tab")` 手动失焦
+3. **老站语义降级**：政府站没 label/aria，id 选择器是合理降级而非偷懒
+4. **a11y 树和 DOM 树各管一摊**：元素两棵树都在，"语义找不到" ≠ "元素不在"
+5. **JSONP 走两次**：yzmQuery 拿验证码、vatQuery 拿结果，剥壳模板原样复用 Stage 3
+6. **预言要靠现场打脸**：发票号 20 位无需自己拆，购销方下标不稳定——README 的预判都要更新
+7. **try/finally 嵌在 with 内**：浏览器生命周期是外层，业务异常处理是内层，倒过来浏览器先死
+
+---
+
+## 下一站：Stage 5 预习
+
+**目标**：Stage 4 的 `input("...输入验证码：")` 这一行换成 OCR 自动识别 + 识别错自动重试。其他流程不动。
+
+**ddddocr 上手**：
+
+```python
+import ddddocr
+ocr = ddddocr.DdddOcr()
+result = ocr.classification(img_byte)   # 直接吃 bytes，不要 base64
+```
+
+`img_byte` 你 Stage 4 已经手里有了（`base64.b64decode(data["key1"])` 的产物，或者读 `img/captcha.jpg` 的 bytes）。
+
+**重试骨架**：
+
+```
+for attempt in range(5):
+    1. 拉/解验证码图 → bytes
+    2. ocr.classification(bytes) → answer
+    3. fill answer + press Tab
+    4. expect_response(vatQuery) 包 click(#checkfp)
+    5. 解析响应：
+        - 成功（key1="001"）→ break
+        - 验证码错 → 刷新验证码（具体动作待现场摸排）
+        - 票据信息错 → 直接终止（重试无意义）
+        - 风控提示 → 终止 + 报警，README 说"风控会要求长时间冷静期"
+```
+
+**核心问题（先想答案再写）**：
+
+1. 怎么判断响应是"验证码错"还是"成功"？key1 状态码会变（"001" 成功），其他码代表啥？要故意输错跑几次摸排
+2. 刷新验证码的具体 UI 动作是什么？点 `<img id="yzm_img">` 自己？还是 reset 按钮？现场观察
+3. 重试时之前填的 fphm/kprq/kjje 还在吗？还是表单被清掉了？
+4. 风控触发后怎么辨认？响应里有"频繁"或"稍后再试"字样？
+5. 失败现场保留：每次 attempt 截 captcha + 答案 + 响应到 `logs/attempt_N/`，方便事后分析 OCR 弱点
+
+把 Stage 4 的所有零件保留，只动验证码识别那一环——这就是 Stage 5。
